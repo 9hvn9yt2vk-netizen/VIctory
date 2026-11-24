@@ -980,6 +980,103 @@ mod tests {
         assert!(unsafe { host.device.GetDeviceRemovedReason() }.is_ok());
     }
 
+    /// Raw views start on 16 bytes on the host: element (4 bytes) 0, 4, 8...
+    /// The rest, 4, 8 and 12 bytes past a boundary as in the user report
+    /// (FirstElement 42261210), are refused.
+    #[test]
+    fn raw_views_start_on_16_bytes() {
+        for first in [0, 4, 8, 42_261_208, 42_261_212] {
+            assert!(raw_start_fits(first), "{first}");
+        }
+        for first in [1, 2, 3, 5, 42_261_209, 42_261_210, 42_261_211] {
+            assert!(!raw_start_fits(first), "{first}");
+        }
+    }
+
+    /// The raw views the check lets through, at starts other than 0, are
+    /// made on the real device as SRVs and UAVs and leave it alive.
+    #[test]
+    fn raw_views_that_fit_are_accepted_by_the_device() {
+        let Some(host) = host() else {
+            return; // no host GPU
+        };
+        let Some(heap) = HostHeap::new(false, 4) else {
+            return;
+        };
+        let properties = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_DEFAULT,
+            ..Default::default()
+        };
+        let desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+            Width: 1024,
+            Height: 1,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            ..Default::default()
+        };
+        let mut buffer: Option<ID3D12Resource> = None;
+        // SAFETY: plain creation from valid descriptions.
+        unsafe {
+            host.device.CreateCommittedResource(
+                &properties,
+                D3D12_HEAP_FLAG_NONE,
+                &desc,
+                D3D12_RESOURCE_STATE_COMMON,
+                None,
+                &mut buffer,
+            )
+        }
+        .expect("buffer");
+        let buffer = buffer.expect("buffer");
+        for first in (0..64).filter(|&f| raw_start_fits(f)) {
+            let srv = D3D12_SHADER_RESOURCE_VIEW_DESC {
+                Format: DXGI_FORMAT_R32_TYPELESS,
+                ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
+                Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                    Buffer: D3D12_BUFFER_SRV {
+                        FirstElement: first,
+                        NumElements: 16,
+                        Flags: D3D12_BUFFER_SRV_FLAG_RAW,
+                        ..Default::default()
+                    },
+                },
+            };
+            let uav = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+                Format: DXGI_FORMAT_R32_TYPELESS,
+                ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
+                Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                    Buffer: D3D12_BUFFER_UAV {
+                        FirstElement: first,
+                        NumElements: 16,
+                        Flags: D3D12_BUFFER_UAV_FLAG_RAW,
+                        ..Default::default()
+                    },
+                },
+            };
+            // SAFETY: a live buffer and slots of our heap.
+            unsafe {
+                host.device
+                    .CreateShaderResourceView(&buffer, Some(&srv), heap.cpu(0));
+                host.device.CreateUnorderedAccessView(
+                    &buffer,
+                    None::<&ID3D12Resource>,
+                    Some(&uav),
+                    heap.cpu(1),
+                );
+            }
+        }
+        // SAFETY: a plain device query.
+        assert!(unsafe { host.device.GetDeviceRemovedReason() }.is_ok());
+    }
+
     /// Dynamic slots stay taken until given back, and runs do not wrap.
     #[test]
     fn dynamic_slots_are_held_until_released() {
