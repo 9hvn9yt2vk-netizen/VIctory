@@ -89,6 +89,8 @@ pub mod validator;
 #[cfg(all(test, windows))]
 mod valu_tests;
 mod wave;
+#[cfg(test)]
+mod wave64_fixtures;
 
 use crate::dxbc::{Container, FourCC};
 use crate::native::{HwStage, NativeProgram, RootType};
@@ -134,6 +136,28 @@ fn parse_loop_limit(value: Option<&str>) -> u32 {
         _ => lower::LOOP_LIMIT,
     }
 }
+
+/// Whether the host device runs 64-lane waves (`WaveSize(64)`): set once,
+/// before the first translation, by whoever creates the host device
+/// ([`set_host_wave64`]); true until then. AMD's RDNA GPUs do; NVIDIA's
+/// and Intel's have 32 lanes (or fewer) and refuse a pipeline that
+/// declares 64. Without them a compute program that needs the console's
+/// 64 lanes runs its cross-lane steps through group-shared memory when its
+/// group is that one wave, and is refused with a reason otherwise. The
+/// value is part of the translation, so the shader cache must key on it
+/// (`victory-gpu`'s does).
+pub fn host_wave64() -> bool {
+    HOST_WAVE64.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Sets [`host_wave64`] from the host device's lane counts
+/// (`D3D12_FEATURE_DATA_D3D12_OPTIONS1::WaveLaneCountMin/Max`).
+pub fn set_host_wave64(min_lanes: u32, max_lanes: u32) {
+    let yes = (min_lanes..=max_lanes).contains(&64);
+    HOST_WAVE64.store(yes, std::sync::atomic::Ordering::Relaxed);
+}
+
+static HOST_WAVE64: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// A translated shader and what the host binds for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -283,6 +307,7 @@ pub fn emit(
         outputs,
         prims,
         mesh_stride,
+        host_wave64: host_wave64(),
     })?;
     Ok(HostShader {
         stage: native.stage,
